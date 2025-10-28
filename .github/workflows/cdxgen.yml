@@ -28,10 +28,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js (use Node 20 to provide Web APIs required by undici)
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Install cdxgen (npm)
         run: |
@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           echo "Generating SBOM: ${SBOM_FILE} (format=${FORMAT}) for path: ${SCAN_PATH}"
           mkdir -p "$(dirname "${SBOM_FILE}")" || true
-          # Try to use cdxgen with -o/--output; if not supported, redirect stdout to file.
+          # cdxgen supports -o/--output and --format; redirect to file as fallback
           if cdxgen --help 2>&1 | grep -q -- '-o'; then
             cdxgen -o "${SBOM_FILE}" --format "${FORMAT}" ${EXTRA_ARGS} "${SCAN_PATH}"
           else
