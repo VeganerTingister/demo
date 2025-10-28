@@ -28,15 +28,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.x'
+          node-version: '18'
 
-      - name: Install cdxgen
+      - name: Install cdxgen (npm)
         run: |
-          python -m pip install --upgrade pip
-          pip install cdxgen
+          npm install -g @cyclonedx/cdxgen
 
       - name: Generate CycloneDX SBOM with cdxgen
         env:
@@ -47,20 +46,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "Generating SBOM: ${SBOM_FILE} (format=${FORMAT}) for path: ${SCAN_PATH}"
-          # Create parent directory if needed
           mkdir -p "$(dirname "${SBOM_FILE}")" || true
-          # Run cdxgen. If cdxgen supports -o and --format this will write the file,
-          # otherwise cdxgen will typically print to stdout and we fallback to redirect.
+          # Try to use cdxgen with -o/--output; if not supported, redirect stdout to file.
           if cdxgen --help 2>&1 | grep -q -- '-o'; then
             cdxgen -o "${SBOM_FILE}" --format "${FORMAT}" ${EXTRA_ARGS} "${SCAN_PATH}"
           else
-            # fallback: redirect stdout to file
-            cdxgen ${EXTRA_ARGS} --format "${FORMAT}" "${SCAN_PATH}" > "${SBOM_FILE}"
+            cdxgen --format "${FORMAT}" ${EXTRA_ARGS} "${SCAN_PATH}" > "${SBOM_FILE}"
           fi
           echo "SBOM generated at: $(realpath "${SBOM_FILE}")"
-          echo "Snapshot of generated SBOM file:"
           ls -la "${SBOM_FILE}" || true
-          echo "SHA256:"
           sha256sum "${SBOM_FILE}" || true
 
       - name: Upload SBOM artifact
