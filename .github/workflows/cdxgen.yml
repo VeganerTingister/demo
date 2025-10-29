@@ -18,7 +18,15 @@ on:
       extra_args:
         description: 'Extra CLI args to pass to cdxgen (optional)'
         required: false
-        default: ''
+        default: '-r'
+      upload_to_dt:
+        description: 'Upload SBOM to Dependency-Track?'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   generate-sbom:
@@ -28,16 +36,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (use Node 20 to provide Web APIs required by undici)
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set up Python (for package managers like pip)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
 
       - name: Install cdxgen (npm)
         run: |
           npm install -g @cyclonedx/cdxgen
 
-      - name: Generate CycloneDX SBOM with cdxgen
+      - name: Generate CycloneDX SBOM with cdxgen (with comprehensive options)
         env:
           SBOM_FILE: ${{ inputs.sbom_filename }}
           FORMAT: ${{ inputs.format }}
@@ -47,18 +60,66 @@ jobs:
           set -euo pipefail
           echo "Generating SBOM: ${SBOM_FILE} (format=${FORMAT}) for path: ${SCAN_PATH}"
           mkdir -p "$(dirname "${SBOM_FILE}")" || true
-          # cdxgen supports -o/--output and --format; redirect to file as fallback
-          if cdxgen --help 2>&1 | grep -q -- '-o'; then
-            cdxgen -o "${SBOM_FILE}" --format "${FORMAT}" ${EXTRA_ARGS} "${SCAN_PATH}"
-          else
-            cdxgen --format "${FORMAT}" ${EXTRA_ARGS} "${SCAN_PATH}" > "${SBOM_FILE}"
+          
+          # -r = recursive, includes licenses and metadata
+          # --include-licenses = explicitly include license information
+          # --spec-version 1.6 = use latest CycloneDX spec
+          cdxgen \
+            -o "${SBOM_FILE}" \
+            --format "${FORMAT}" \
+            --spec-version 1.6 \
+            --include-licenses \
+            -r ${EXTRA_ARGS} \
+            "${SCAN_PATH}"
+          
+          echo "✅ SBOM generated successfully"
+          ls -lh "${SBOM_FILE}"
+          echo "SHA256: $(sha256sum "${SBOM_FILE}" | cut -d' ' -f1)"
+          
+          # Display component count for verification
+          if [ "${FORMAT}" = "json" ]; then
+            COMPONENT_COUNT=$(jq '.components | length' "${SBOM_FILE}" 2>/dev/null || echo "N/A")
+            echo "Components found: ${COMPONENT_COUNT}"
           fi
-          echo "SBOM generated at: $(realpath "${SBOM_FILE}")"
-          ls -la "${SBOM_FILE}" || true
-          sha256sum "${SBOM_FILE}" || true
+
+      - name: Upload SBOM to Dependency-Track
+        if: ${{ inputs.upload_to_dt == 'true' }}
+        env:
+          DT_URL: ${{ secrets.DEPENDENCYTRACK_URL }}
+          DT_API_KEY: ${{ secrets.DEPENDENCYTRACK_API_KEY }}
+          DT_PROJECT_UUID: ${{ secrets.DEPENDENCYTRACK_PROJECT_UUID }}
+          SBOM_FILE: ${{ inputs.sbom_filename }}
+        run: |
+          set -euo pipefail
+          
+          if [ -z "$DT_URL" ] || [ -z "$DT_API_KEY" ] || [ -z "$DT_PROJECT_UUID" ]; then
+            echo "⚠️  Skipping upload: Missing Dependency-Track secrets"
+            echo "   Required: DEPENDENCYTRACK_URL, DEPENDENCYTRACK_API_KEY, DEPENDENCYTRACK_PROJECT_UUID"
+            exit 0
+          fi
+          
+          echo "📤 Uploading SBOM to Dependency-Track: $DT_URL"
+          RESPONSE=$(curl --silent --write-out "\n%{http_code}" --location "${DT_URL}/api/v1/bom" \
+            --header "X-Api-Key: ${DT_API_KEY}" \
+            --header "Content-Type: application/json" \
+            --form "project=\"${DT_PROJECT_UUID}\"" \
+            --form "bom=@\"${SBOM_FILE}\"")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            echo "✅ SBOM uploaded successfully (HTTP $HTTP_CODE)"
+            echo "   Token: $(echo "$BODY" | jq -r '.token // "N/A"' 2>/dev/null || echo "$BODY")"
+          else
+            echo "❌ Upload failed (HTTP $HTTP_CODE)"
+            echo "   Response: $BODY"
+            exit 1
+          fi
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sbom
+          name: sbom-${{ inputs.format }}
           path: ${{ inputs.sbom_filename }}
+          retention-days: 30
